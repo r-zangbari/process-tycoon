@@ -1,0 +1,68 @@
+name: Publish Process Tycoon
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - game.zip
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v6
+      - name: Prepare Pages
+        uses: actions/configure-pages@v5
+      - name: Prepare game from ZIP
+        shell: bash
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import zipfile, shutil
+          archive = Path('game.zip')
+          if not archive.is_file():
+              raise SystemExit('Upload game.zip in the repository root first.')
+          unpacked = Path('_unpacked').resolve()
+          unpacked.mkdir()
+          with zipfile.ZipFile(archive) as z:
+              if sum(i.file_size for i in z.infolist()) > 250_000_000:
+                  raise SystemExit('Unpacked ZIP is too large for this recipe.')
+              for i in z.infolist():
+                  target = (unpacked / i.filename).resolve()
+                  if not target.is_relative_to(unpacked):
+                      raise SystemExit('Unsafe ZIP path.')
+                  if (i.external_attr >> 16) & 0o170000 == 0o120000:
+                      raise SystemExit('Symbolic links are not supported.')
+              z.extractall(unpacked)
+          entries = [p for p in unpacked.rglob('index.html')
+                     if '__MACOSX' not in p.parts]
+          if len(entries) != 1:
+              raise SystemExit('ZIP must contain exactly one index.html.')
+          shutil.copytree(entries[0].parent, '_site',
+              ignore=shutil.ignore_patterns('.git', '.github', 'node_modules',
+                                           '__pycache__', '*.zip'))
+          Path('_site/.nojekyll').touch()
+          print('Ready:', len(list(Path('_site').rglob('*'))), 'items')
+          PYTHON
+      - name: Upload website
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Publish website
+        id: deployment
+        uses: actions/deploy-pages@v4
