@@ -6,63 +6,131 @@ on:
     paths:
       - game.zip
       - .github/workflows/pages.yml
+
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - name: Get repository
         uses: actions/checkout@v6
+
       - name: Prepare Pages
         uses: actions/configure-pages@v5
-      - name: Prepare game from ZIP
+
+      - name: Extract game
         shell: bash
         run: |
           python3 - <<'PYTHON'
           from pathlib import Path
-          import zipfile, shutil
-          archive = Path('game.zip')
+          import zipfile
+          import shutil
+
+          archive = Path("game.zip")
+
           if not archive.is_file():
-              raise SystemExit('Upload game.zip in the repository root first.')
-          unpacked = Path('_unpacked').resolve()
+              raise SystemExit("game.zip not found")
+
+          unpacked = Path("_unpacked").resolve()
           unpacked.mkdir()
+
           with zipfile.ZipFile(archive) as z:
               if sum(i.file_size for i in z.infolist()) > 250_000_000:
-                  raise SystemExit('Unpacked ZIP is too large for this recipe.')
+                  raise SystemExit("ZIP too large")
+
               for i in z.infolist():
                   target = (unpacked / i.filename).resolve()
+
                   if not target.is_relative_to(unpacked):
-                      raise SystemExit('Unsafe ZIP path.')
+                      raise SystemExit("Unsafe ZIP path")
+
                   if (i.external_attr >> 16) & 0o170000 == 0o120000:
-                      raise SystemExit('Symbolic links are not supported.')
+                      raise SystemExit("Symbolic links not supported")
+
               z.extractall(unpacked)
-          entries = [p for p in unpacked.rglob('index.html')
-                     if '__MACOSX' not in p.parts]
+
+          entries = [
+              p for p in unpacked.rglob("index.html")
+              if "__MACOSX" not in p.parts
+          ]
+
           if len(entries) != 1:
-              raise SystemExit('ZIP must contain exactly one index.html.')
-          shutil.copytree(entries[0].parent, '_site',
-              ignore=shutil.ignore_patterns('.git', '.github', 'node_modules',
-                                           '__pycache__', '*.zip'))
-          Path('_site/.nojekyll').touch()
-          print('Ready:', len(list(Path('_site').rglob('*'))), 'items')
+              raise SystemExit("Expected exactly one index.html")
+
+          shutil.copytree(
+              entries[0].parent,
+              "_site",
+              ignore=shutil.ignore_patterns(
+                  ".git",
+                  ".github",
+                  "node_modules",
+                  "__pycache__",
+                  "*.zip"
+              )
+          )
+
+          Path("_site/.nojekyll").touch()
+
+          print("Game prepared successfully")
           PYTHON
+
+      - name: Verify website
+        run: |
+          test -f _site/index.html
+          ls -lah _site
+          du -sh _site
+
       - name: Upload website
         uses: actions/upload-pages-artifact@v4
         with:
+          name: github-pages
           path: _site
+          retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in {1..12}; do
+            COUNT=$(gh api \
+              "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+              --jq '[.artifacts[] | select(.name == "github-pages" and .expired == false)] | length')
+
+            if [ "$COUNT" = "1" ]; then
+              echo "Artifact found successfully"
+              exit 0
+            fi
+
+            echo "Checking artifact availability..."
+            sleep 10
+          done
+
+          echo "Artifact unavailable"
+          exit 1
+
       - name: Publish website
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages
